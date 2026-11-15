@@ -23,6 +23,7 @@ from app.paper import PaperBook
 from app.local_market import LocalMarket
 from app.reporting import summary, transactions
 from ml.paper_model import PaperLearner
+from app.report_lab import ReportLab
 from ml.research import baseline, train
 from app.terminal import Terminal
 from app.oauth import OAuthConfig, UpstoxOAuth, OAuthError, CALLBACK, login_cookie
@@ -59,6 +60,7 @@ class Application:
         self.poll()
         self.terminal = Terminal(self)
         self.paper_learner = PaperLearner(self)
+        self.report_lab = ReportLab(self)
 
     def market_now(self):
         return self.local.clock(self.account_key) if self.mode == 'demo' else now()
@@ -203,6 +205,7 @@ class Application:
                     "csrf": self.csrf, "pairs": pairs, "account": account,
                     "market_time": clock.isoformat(), "performance": summary(account),
                     "transactions": transactions(account), "paper_model": self.paper_learner.view(),
+                    "daily_report": self.report_lab.view(),
                     "local": self.local.view(self.account_key) if self.mode == 'demo' else None,
                     "terminal": self.terminal.view(),
                     "source": "Synthetic demo · not market prices" if self.mode == "demo" else "Upstox · 5-second quote polling",
@@ -252,6 +255,8 @@ class Application:
                 pair = next((p for p in PAIRS if p["id"] == data.get("pair")), None)
                 if route == '/api/scan':
                     self.terminal.scan()
+                elif route == '/api/report/run':
+                    self.report_lab.start()
                 elif route == '/api/local':
                     if self.mode != 'demo': raise ValueError('Select local simulation first.')
                     if self.terminal.job['running']: raise ValueError('Wait for model training to finish.')
@@ -358,6 +363,12 @@ def handler_for(app):
                 return self.send(204, b"", "image/x-icon")
             if route == "/api/state":
                 return self.send(200, app.snapshot())
+            if route == '/api/report/artifact':
+                try:
+                    params=parse_qs(urlparse(self.path).query,max_num_fields=4)
+                    with app.lock:path=app.report_lab.artifact(params.get('run',[''])[0],params.get('name',[''])[0])
+                    return self.send(200,path.read_bytes(),mimetypes.guess_type(path.name)[0] or 'application/octet-stream')
+                except (ValueError,OSError):return self.send(404,{'error':'Report artifact not found.'})
             if route == "/api/export":
                 with app.lock:
                     rows = app.book.read(app.account_key)["trades"]
@@ -375,7 +386,7 @@ def handler_for(app):
                 writer.writeheader()
                 writer.writerows(rows)
                 return self.send(200, buffer.getvalue(), 'text/csv; charset=utf-8')
-            name = {"/": "terminal.html", "/app.js": "terminal.js", "/local.js": "local.js", "/style.css": "terminal.css"}.get(route)
+            name = {"/": "terminal.html", "/app.js": "terminal.js", "/local.js": "local.js", "/report.js": "report.js", "/style.css": "terminal.css"}.get(route)
             if name:
                 return self.send(200, (STATIC/name).read_bytes(), (mimetypes.guess_type(name)[0] or "text/plain")+"; charset=utf-8")
             self.send(404, {"error": "Not found."})

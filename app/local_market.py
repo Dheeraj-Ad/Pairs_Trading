@@ -6,7 +6,7 @@ import time
 
 import numpy as np
 
-from app.market import PAIRS, IST, demo_candles
+from app.market import PAIRS, IST, DEMO_PARAMETERS, demo_candles
 
 
 class LocalMarket:
@@ -26,7 +26,20 @@ class LocalMarket:
                 row = db.execute('SELECT body FROM local_markets WHERE account=?', (account,)).fetchone()
             self.cache[account] = json.loads(row[0]) if row else {
                 'step': 0, 'bars': {p['id']: demo_candles(i) for i, p in enumerate(PAIRS)}}
-            if not row:
+            # Extend existing simulations without rewinding their clock or replacing
+            # any candles/prices already used for fills and model decisions.
+            state = self.cache[account]
+            reference = state['bars']['banks']['y'][-720:]
+            changed = False
+            for i, pair in enumerate(PAIRS):
+                if pair['id'] in state['bars']: continue
+                bars = demo_candles(i)
+                for leg in ('y', 'x'):
+                    bars[leg] = bars[leg][-len(reference):]
+                    for bar, old in zip(bars[leg], reference): bar['time'] = old['time']
+                state['bars'][pair['id']] = bars
+                changed = True
+            if not row or changed:
                 self.save(account)
         return self.cache[account]
 
@@ -59,10 +72,11 @@ class LocalMarket:
             while opening.weekday() >= 5:
                 opening += timedelta(days=1)
         for i, pair in enumerate(PAIRS):
-            rng = np.random.default_rng(100000 + state['step'] * 3 + i)
+            seed = 100000 + state['step'] * 3 + i if i < 3 else np.random.SeedSequence([100000, i, state['step']])
+            rng = np.random.default_rng(seed)
             bars = state['bars'][pair['id']]
             py, px = bars['y'][-1]['close'], bars['x'][-1]['close']
-            base, beta = [1300, 3000, 2800][i], [1.2, .45, 3.3][i]
+            base, beta = DEMO_PARAMETERS[i]
             x = max(100, px + rng.normal(0, base * .004))
             residual = .87 * (py - 80 - beta * px) + rng.normal(0, base * .006)
             y = max(100, 80 + beta * x + residual)

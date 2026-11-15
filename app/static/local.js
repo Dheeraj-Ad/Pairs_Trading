@@ -8,6 +8,12 @@ document.querySelector('.automation').insertAdjacentHTML('beforeend', `
   <label for="manual-budget">Gross allocation (INR)</label><input id="manual-budget" type="number" min="1000" max="500000" step="1000" value="100000" required>
   <button id="manual-open" class="primary">Open both paper legs</button></form><p class="fine">Uses the selected qualified pair and its fitted hedge ratio. Close manually from Positions.</p></section>`);
 document.querySelector('#page-models').insertAdjacentHTML('beforeend', `
+  <section class="method"><h2>Models used in this application</h2><div class="table-wrap"><table><thead><tr><th>MODEL / METHOD</th><th>PURPOSE</th><th>SETTINGS</th></tr></thead><tbody>
+  <tr><td>Random Forest classifier</td><td>Five-minute net-profit entry score</td><td>180 trees · depth 5 · minimum leaf 10</td></tr>
+  <tr><td>Paper outcome Random Forest</td><td>Learn from completed manual and automatic trades</td><td>120 trees · depth 4 · minimum leaf 4 · 40+ trades</td></tr>
+  <tr><td>OLS + Engle–Granger cointegration</td><td>Hedge ratio and statistical pair screening</td><td>Return correlation ≥ 0.40 · FDR &lt; 0.05</td></tr>
+  <tr><td>Daily research Random Forest</td><td>Legacy daily spread-contraction research</td><td>160 trees · depth 5 · separate from terminal automation</td></tr>
+  </tbody></table></div><p>Classifier inputs: spread Z-score, absolute Z-score, normalized spread change, and spread volatility. Scores are uncalibrated estimates. The optional paper-trained filter stays disabled until trained and explicitly enabled after validation.</p><p id="candidate-universe"></p></section>
   <section class="method"><h2>Learn from paper trading</h2><p>Closed manual and automatic trades from this account only. Entry features are saved before the result is known. Local and Upstox results stay separate.</p>
   <div id="paper-training-status"></div><div class="action-row"><button id="train-paper" class="primary">Train from completed trades</button><button id="paper-filter">Enable learned entry filter</button></div><div id="paper-training-report"></div>
   <p class="fine">At least 40 eligible closed trades, including wins and losses, are required. Evaluation uses chronological 60/20/20 splits and removes outcomes overlapping the next period. The optional filter requires validation AUC and balanced accuracy above 0.50; it adds a score ≥ 0.50 gate to future automatic entries. It cannot guarantee profit. Models and filter activation must be renewed after a restart.</p></section>`);
@@ -20,7 +26,16 @@ document.querySelector('#page-history').insertAdjacentHTML('afterend', `
 function historyMatch(row){return ($('history-origin').value==='all'||(row.origin||'manual')===$('history-origin').value)&&($('history-pair').value==='all'||row.pair===$('history-pair').value);}
 function performanceTable(rows){return '<div class="table-wrap"><table><thead><tr><th>SECTION</th><th>REALIZED</th><th>OPEN NET</th><th>TOTAL P&L</th><th>FEES</th><th>BORROW</th><th>OPEN / CLOSED</th><th>WIN / LOSS</th></tr></thead><tbody>'+rows.map(r=>`<tr><td>${esc(r.label)}</td><td class="${tone(r.realized)}">${money(r.realized)}</td><td class="${tone(r.open_net)}">${money(r.open_net)}</td><td class="${tone(r.total)}">${money(r.total)}</td><td>${money(r.fees)}</td><td>${money(r.borrow)}</td><td>${r.open} / ${r.closed}</td><td>${r.wins} / ${r.losses}</td></tr>`).join('')+'</tbody></table></div>';}
 function renderLocal(){
+  if(typeof renderReport==='function')renderReport();
   const local=state.local, t=state.terminal, learner=state.paper_model, pair=t.qualified.find(p=>p.id===selected);
+  const universe=state.pairs.map(p=>p.id).join('|');
+  if($('history-pair').dataset.universe!==universe){
+    const previous=$('history-pair').value;
+    $('history-pair').innerHTML='<option value="all">All pairs</option>'+state.pairs.map(p=>`<option value="${esc(p.id)}">${esc(p.y)} / ${esc(p.x)} · ${esc(p.name)}</option>`).join('');
+    $('history-pair').value=state.pairs.some(p=>p.id===previous)?previous:'all';
+    $('history-pair').dataset.universe=universe;
+  }
+  $('candidate-universe').textContent=`${new Set(state.pairs.flatMap(p=>[p.y,p.x])).size} companies · ${state.pairs.length} candidate pairs: `+state.pairs.map(p=>`${p.y} / ${p.x}`).join(', ')+'. Candidates must pass screening; inclusion is not a trading recommendation.';
   $('local-controls').hidden=!local;
   if(local){$('local-clock').textContent=`${stamp(local.time)} IST · ${local.steps} candles advanced · ${local.batch_active?local.remaining+' candles remaining':local.running?'running':'paused'}`;$('local-play').textContent=local.running||local.batch_active?'Pause local market':'Run local market';}
   $('local-play').disabled=busy||t.job.running;

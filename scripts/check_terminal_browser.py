@@ -9,6 +9,7 @@ from http.server import ThreadingHTTPServer
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 from playwright.sync_api import sync_playwright, expect
 from app.server import Application, handler_for
+from app.market import PAIRS
 
 
 def main():
@@ -35,7 +36,7 @@ def main():
                 page.locator('#connection-form button[type="submit"]').click()
                 expect(page.locator('#connection')).not_to_be_visible()
                 page.locator('#scan').click()
-                expect(page.locator('#pair-list .pair-card')).to_have_count(1,timeout=60000)
+                expect(page.locator('#pair-list [data-pair="banks"]')).to_be_visible(timeout=60000)
                 expect(page.locator('#charts')).to_be_visible()
                 expect(page.locator('#pair-title')).to_have_text('HDFCBANK / ICICIBANK')
                 expect(page.locator('#start-auto')).to_be_enabled()
@@ -51,7 +52,9 @@ def main():
                 page.locator('#toast').evaluate('(e)=>e.hidden=true')
                 page.screenshot(path=str(output/'terminal-desktop.png'),full_page=True)
                 page.locator('[data-page="models"]').click()
-                expect(page.locator('#model-table tbody tr')).to_have_count(3)
+                expect(page.locator('#model-table tbody tr')).to_have_count(len(PAIRS))
+                expect(page.locator('#candidate-universe')).to_contain_text('20 companies')
+                expect(page.locator('#history-pair option')).to_have_count(len(PAIRS)+1)
                 expect(page.locator('#model-table')).to_contain_text('REJECTED')
                 page.screenshot(path=str(output/'models-desktop.png'),full_page=True)
                 page.locator('[data-page="terminal"]').click()
@@ -82,7 +85,7 @@ def main():
                 page.locator('[data-page="terminal"]').click()
                 expect(page.locator('#charts')).to_be_hidden()
                 page.locator('#scan').click()
-                expect(page.locator('#pair-list .pair-card')).to_have_count(1,timeout=60000)
+                expect(page.locator('#pair-list [data-pair="banks"]')).to_be_visible(timeout=60000)
                 page.set_viewport_size({'width':390,'height':844})
                 page.locator('#toast').evaluate('(e)=>e.hidden=true')
                 page.screenshot(path=str(output/'terminal-mobile.png'),full_page=True)

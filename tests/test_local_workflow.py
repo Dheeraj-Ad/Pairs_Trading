@@ -9,12 +9,38 @@ import numpy as np
 import pandas as pd
 
 from app.server import Application
-from app.market import fresh
+from app.market import fresh, PAIRS
 from ml.paper_model import train_trades, dataset
 from ml.research import FEATURES
 
 
 class LocalWorkflowTests(unittest.TestCase):
+    def test_expanding_saved_universe_preserves_prices_clock_and_ledger(self):
+        import json
+        with tempfile.TemporaryDirectory() as directory:
+            app=Application(directory)
+            app.advance_local(2)
+            key=app.account_key
+            old=deepcopy(app.local.state(key))
+            old['bars']={p:bars for p,bars in old['bars'].items() if p in ('banks','it','auto')}
+            with app.book.connect() as db:
+                db.execute('UPDATE local_markets SET body=? WHERE account=?',(json.dumps(old),key))
+            reopened=Application(directory)
+            state=reopened.local.state(key)
+            self.assertEqual(state['step'],old['step'])
+            self.assertEqual(reopened.market_now(),app.market_now())
+            for pair,bars in old['bars'].items(): self.assertEqual(state['bars'][pair],bars)
+            self.assertEqual(len(state['bars']),len(PAIRS))
+            self.assertEqual(len(reopened.quotes),20)
+            for pair in PAIRS:
+                bars=state['bars'][pair['id']]
+                for leg in ('y','x'):
+                    self.assertEqual(bars[leg][-1]['time']+300,int(reopened.market_now().timestamp()))
+                    self.assertEqual(bars[leg][-1]['close'],reopened.quotes[pair[leg]]['price'])
+            self.assertEqual(reopened.book.read(key),app.book.read(key))
+            reopened.advance_local()
+            self.assertEqual(len(reopened.quotes),20)
+
     def test_background_batch_can_pause_and_blocks_switching(self):
         from unittest.mock import patch
         import threading

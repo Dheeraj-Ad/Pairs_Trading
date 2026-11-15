@@ -17,7 +17,18 @@ PAIRS = [
     {"id": "banks", "name": "Banking", "y": "HDFCBANK", "x": "ICICIBANK", "isin_y": "INE040A01034", "isin_x": "INE090A01021"},
     {"id": "it", "name": "Information technology", "y": "INFY", "x": "TCS", "isin_y": "INE009A01021", "isin_x": "INE467B01029"},
     {"id": "auto", "name": "Automobiles", "y": "MARUTI", "x": "M&M", "isin_y": "INE585B01010", "isin_x": "INE101A01026"},
+    {"id": "psu_banks", "name": "Public-sector banks", "y": "SBIN", "x": "BANKBARODA", "isin_y": "INE062A01020", "isin_x": "INE028A01039"},
+    {"id": "it_services", "name": "IT services", "y": "HCLTECH", "x": "WIPRO", "isin_y": "INE860A01027", "isin_x": "INE075A01022"},
+    {"id": "pharma", "name": "Pharmaceuticals", "y": "SUNPHARMA", "x": "CIPLA", "isin_y": "INE044A01036", "isin_x": "INE059A01026"},
+    {"id": "steel", "name": "Steel", "y": "TATASTEEL", "x": "JSWSTEEL", "isin_y": "INE081A01020", "isin_x": "INE019A01038"},
+    {"id": "cement", "name": "Cement", "y": "ULTRACEMCO", "x": "AMBUJACEM", "isin_y": "INE481G01011", "isin_x": "INE079A01024"},
+    {"id": "consumer", "name": "Consumer goods", "y": "HINDUNILVR", "x": "DABUR", "isin_y": "INE030A01027", "isin_x": "INE016A01026"},
+    {"id": "power", "name": "Power utilities", "y": "POWERGRID", "x": "NTPC", "isin_y": "INE752E01010", "isin_x": "INE733E01010"},
 ]
+
+# Synthetic price scales only; these are not current prices or fitted live hedges.
+DEMO_PARAMETERS = [(1300, 1.2), (3000, .45), (2800, 3.3), (250, 2.5),
+                   (250, 4.5), (1400, 1.2), (900, .15), (500, 18.), (500, 4.), (300, .9)]
 
 
 def now():
@@ -184,8 +195,7 @@ def demo_candles(pair_index):
 def demo_history(pair_index):
     rng = np.random.default_rng(42 + pair_index)
     n = 720
-    base = [1300, 3000, 2800][pair_index]
-    beta = [1.2, .45, 3.3][pair_index]
+    base, beta = DEMO_PARAMETERS[pair_index]
     x = base + np.cumsum(rng.normal(0, base*.004, n))
     residual = np.zeros(n)
     for i in range(1, n):

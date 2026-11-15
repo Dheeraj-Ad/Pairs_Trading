@@ -184,7 +184,7 @@ class IntegrationTests(unittest.TestCase):
         data={s:{'instrument_token':k,'last_price':100.,'last_trade_time':str(int(now().timestamp()*1000)), 'prev_close_price':99.} for s,k in keys.items()}
         with patch.object(provider,'keys',return_value=keys), patch.object(provider,'get',return_value=data):
             result=provider.quotes('NSE')
-            self.assertEqual(len(result),6)
+            self.assertEqual(len(result),len(keys))
             self.assertEqual(result['HDFCBANK']['price'],100.)
             data.pop('HDFCBANK')
             with self.assertRaises(ValueError): provider.quotes('NSE')
@@ -196,7 +196,7 @@ class IntegrationTests(unittest.TestCase):
         with patch('urllib.request.urlopen',return_value=io.BytesIO(compressed)):
             keys=Upstox().keys('BSE')
         self.assertEqual(keys['HDFCBANK'],'BSE_EQ|INE040A01034')
-        self.assertEqual(len(keys),6)
+        self.assertEqual(len(keys),len({p[leg] for p in PAIRS for leg in ('y','x')}))
 
     def test_http_security_and_full_paper_roundtrip(self):
         server=ThreadingHTTPServer(('127.0.0.1',0),handler_for(self.app))

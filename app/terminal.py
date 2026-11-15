@@ -139,6 +139,9 @@ class Terminal:
 
     def update_signals(self):
         for pair_id,bars in self.candles.items():
+            if any(row['id'] == pair_id and not row['eligible'] for row in self.screen):
+                self.signals.pop(pair_id, None)
+                continue
             try:
                 frame=candle_frame(bars, completed_at=self.clock())
                 report=self.reports[pair_id]
