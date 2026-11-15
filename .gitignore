@@ -1,0 +1,11 @@
+.venv/
+.ipynb_checkpoints/
+__pycache__/
+.jupyter-runtime/
+outputs/
+runtime/
+.market-cache/
+.env
+.env.*
+!.env.example
+*.py[cod]

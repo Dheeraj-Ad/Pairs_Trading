@@ -1,0 +1,22 @@
+{
+  "groups": {
+    "banks": ["HDFCBANK.NS", "ICICIBANK.NS", "AXISBANK.NS"],
+    "information_technology": ["INFY.NS", "TCS.NS", "HCLTECH.NS"],
+    "pharmaceuticals": ["SUNPHARMA.NS", "DRREDDY.NS", "CIPLA.NS"]
+  },
+  "history_start": "2021-01-01",
+  "formation_observations": 504,
+  "lookback": 60,
+  "minimum_correlation": 0.4,
+  "fdr_alpha": 0.05,
+  "entry_z": 2.0,
+  "exit_z": 0.5,
+  "stop_z": 4.0,
+  "max_hold": 20,
+  "max_model_age": 63,
+  "capital_inr": 100000.0,
+  "gross_fraction": 0.5,
+  "cost_bps_per_leg": 15.0,
+  "annual_borrow_rate": 0.1,
+  "max_data_age_days": 7
+}
