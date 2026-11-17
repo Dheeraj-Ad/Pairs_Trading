@@ -193,10 +193,19 @@ class IntegrationTests(unittest.TestCase):
         rows=[{'isin':p['isin_'+leg], 'instrument_key':'BSE_EQ|'+p['isin_'+leg],
                'segment':'BSE_EQ','instrument_type':'A'} for p in PAIRS for leg in ('y','x')]
         compressed=gzip.compress(json.dumps(rows).encode())
-        with patch('urllib.request.urlopen',return_value=io.BytesIO(compressed)):
+        with patch('urllib.request.urlopen',return_value=io.BytesIO(compressed)) as request:
             keys=Upstox().keys('BSE')
+        self.assertEqual(request.call_args.args[0].get_header('User-agent'),'PairwisePaperTrading/1.0')
         self.assertEqual(keys['HDFCBANK'],'BSE_EQ|INE040A01034')
         self.assertEqual(len(keys),len({p[leg] for p in PAIRS for leg in ('y','x')}))
+
+    def test_market_api_identifies_the_application(self):
+        response=io.BytesIO(json.dumps({'status':'success','data':{'ok':True}}).encode())
+        with patch('urllib.request.urlopen',return_value=response) as request:
+            result=Upstox('test-token').get('/v3/market-quote/quotes')
+        self.assertEqual(result,{'ok':True})
+        self.assertEqual(request.call_args.args[0].get_header('User-agent'),'PairwisePaperTrading/1.0')
+        self.assertEqual(request.call_args.args[0].get_header('Authorization'),'Bearer test-token')
 
     def test_http_security_and_full_paper_roundtrip(self):
         server=ThreadingHTTPServer(('127.0.0.1',0),handler_for(self.app))

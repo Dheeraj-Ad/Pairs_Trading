@@ -20,7 +20,7 @@ def main():
     output.mkdir(parents=True,exist_ok=True)
     with tempfile.TemporaryDirectory() as directory:
         app=Application(directory,oauth_config=OAuthConfig())
-        quotes=dict(app.quotes);app.provider.token='';app.mode='live';app.quotes={};app.error='Connect with Upstox to start market data.'
+        quotes=dict(app.quotes);app.provider.token=''
         server=ThreadingHTTPServer(('127.0.0.1',0),handler_for(app))
         base=f'http://127.0.0.1:{server.server_port}'
         app.oauth.config.redirect_uri=base+CALLBACK
@@ -43,9 +43,15 @@ def main():
                 page.route('https://api.upstox.com/v2/login/authorization/dialog?*',authorization)
                 page.goto(base)
                 page.locator('#connection-button').click()
+                expect(page.locator('#mode')).to_have_value('demo')
+                expect(page.locator('#oauth-main')).to_be_visible()
                 expect(page.locator('#oauth-setup')).to_be_visible()
                 expect(page.locator('#oauth-start')).to_be_disabled()
                 page.screenshot(path=str(output/'developer-setup.png'))
+                page.goto(base+'/?connect=upstox')
+                expect(page.locator('#connection')).to_be_visible()
+                expect(page.locator('#oauth-start')).to_be_visible()
+                assert app.mode=='demo', 'Opening sign-in must not switch the account.'
                 app.oauth.config.client_id='test-browser-key';app.oauth.config.client_secret='browser-app-secret'
                 expect(page.locator('#oauth-start')).to_be_enabled(timeout=10000)
                 expect(page.locator('#oauth-setup')).to_be_hidden()
@@ -68,6 +74,12 @@ def main():
                 expect(page.locator('#toast')).to_contain_text('cancelled',timeout=30000)
                 expect(page.locator('#connection')).to_be_visible()
                 assert app.provider.token=='browser-private-token';assert exchange.call_count==1
+                expect(page.locator('#oauth-status')).to_contain_text('cancelled')
+                page.reload()
+                page.locator('#connection-button').click()
+                expect(page.locator('#oauth-status')).to_contain_text('cancelled')
+                # A new attempt clears the prior diagnostic, including after a reload.
+                with app.oauth.lock:app.oauth.last_error=None
                 app.oauth_user['expires_at']=(now()-timedelta(seconds=1)).isoformat();app.poll()
                 expect(page.locator('#oauth-status')).to_contain_text('expired',timeout=10000)
                 expect(page.locator('#oauth-start')).to_contain_text('Reconnect')

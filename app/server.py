@@ -11,6 +11,7 @@ import mimetypes
 import os
 from pathlib import Path
 import secrets
+import socket
 import threading
 import time
 from urllib.parse import urlparse, parse_qs
@@ -24,12 +25,26 @@ from app.local_market import LocalMarket
 from app.reporting import summary, transactions
 from ml.paper_model import PaperLearner
 from app.report_lab import ReportLab
+from app.community import CommunityFeed
+from app.demo_session import DemoSession
+from app.groww import Groww, GrowwConfig
 from ml.research import baseline, train
 from app.terminal import Terminal
 from app.oauth import OAuthConfig, UpstoxOAuth, OAuthError, CALLBACK, login_cookie
 
 ROOT = Path(__file__).resolve().parents[1]
 STATIC = Path(__file__).parent / "static"
+
+
+class LocalHTTPServer(ThreadingHTTPServer):
+    # Windows SO_REUSEADDR can let a second process share a listening port,
+    # splitting OAuth state and callbacks between two application instances.
+    allow_reuse_address = False
+
+    def server_bind(self):
+        if os.name == 'nt':
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
 
 
 class Application:
@@ -39,6 +54,8 @@ class Application:
         self.book = PaperBook(self.directory / "paper.sqlite3")
         self.local = LocalMarket(self.book)
         self.provider = Upstox(os.environ.get("UPSTOX_ACCESS_TOKEN", ""))
+        self.upstox = self.provider
+        self.groww_status = dict(configured=GrowwConfig.load(ROOT).configured, error=None, connecting=False)
         self.lock = threading.RLock()
         self.csrf = secrets.token_urlsafe(32)
         self.oauth = UpstoxOAuth(oauth_config or OAuthConfig.load(ROOT))
@@ -61,6 +78,8 @@ class Application:
         self.terminal = Terminal(self)
         self.paper_learner = PaperLearner(self)
         self.report_lab = ReportLab(self)
+        self.community = CommunityFeed(self)
+        self.demo_session = DemoSession(self)
 
     def market_now(self):
         return self.local.clock(self.account_key) if self.mode == 'demo' else now()
@@ -96,10 +115,10 @@ class Application:
                         self.advance_local()
                         self.local.remaining -= 1
                     time.sleep(.01)  # Let state requests and pause controls acquire the lock.
-            except Exception:
+            except Exception as exc:
                 with self.lock:
                     self.terminal.enabled = False
-                    self.terminal.feed_error = 'Local advancement failed. Entries paused; review positions before restarting.'
+                    self.terminal.feed_error = str(exc) if isinstance(exc, ValueError) else 'Local advancement failed. Entries paused; review positions before restarting.'
             finally:
                 with self.lock:
                     self.local.remaining, self.local.batch_active = 0, False
@@ -112,10 +131,56 @@ class Application:
     def research_key(self, pair):
         return ("demo" if self.mode == "demo" else self.account_key) + ":" + pair["id"]
 
+    @property
+    def provider_name(self):
+        return 'Groww' if self.mode == 'groww' else 'Upstox'
+
+    def connect_groww(self, data):
+        """Validate credentials and data before committing a source switch."""
+        with self.lock:
+            exchange = data.get('exchange')
+            if exchange not in ('NSE', 'BSE'):
+                raise ValueError('Choose NSE or BSE.')
+            self.terminal.can_switch('groww:'+exchange)
+            if self.groww_status['connecting']:
+                raise ValueError('A Groww connection check is already running.')
+            token = data.get('token', '')
+            if not isinstance(token, str) or len(token) > 8192 or any(c.isspace() for c in token):
+                raise ValueError('Invalid Groww access-token format.')
+            config = GrowwConfig.load(ROOT)
+            candidate = Groww(config, token)
+            generation = self.terminal.generation
+            self.groww_status.update(configured=config.configured, error=None, connecting=True)
+        try:
+            candidate.authenticate()
+            # Probe access before downloading the full master or 20 quotes.
+            candidate.quote(exchange, 'HDFCBANK')
+            quotes = candidate.quotes(exchange)
+            with self.lock:
+                if generation != self.terminal.generation:
+                    raise ValueError('The account changed while Groww connected. Retry the connection.')
+                self.terminal.can_switch('groww:'+exchange)
+                self.provider = candidate
+                self.mode, self.exchange, self.quotes = 'groww', exchange, quotes
+                self.oauth.cancel()
+                self.terminal.reset()
+                self.error, self.last_poll = None, now().isoformat()
+                self.groww_status['error'] = None
+        except Exception as exc:
+            message = str(exc) if isinstance(exc, ValueError) else 'Groww connection failed. Retry after checking API access.'
+            with self.lock:
+                self.groww_status['error'] = message
+            raise ValueError(message) from None
+        finally:
+            with self.lock:
+                self.groww_status['connecting'] = False
+        return self.snapshot()
+
     def oauth_status(self):
         expired = bool(self.oauth_user and now() >= datetime.fromisoformat(self.oauth_user['expires_at']))
         return dict(configured=self.oauth.config.configured, redirect_uri=self.oauth.config.redirect_uri,
-                    app_url=self.oauth.config.origin, user=self.oauth_user, expired=expired)
+                    app_url=self.oauth.config.origin, user=self.oauth_user, expired=expired,
+                    last_error=self.oauth.error_status())
 
     def start_oauth(self, data, origin):
         with self.lock:
@@ -144,6 +209,7 @@ class Application:
         authorized = self.oauth.exchange(code)
         with self.lock:
             check_context()
+            self.provider = self.upstox
             self.provider.token = authorized['token']
             self.oauth_user = {k:authorized[k] for k in ('user_name','expires_at')}
             self.mode,self.exchange,self.quotes='live',pending['exchange'],{}
@@ -168,11 +234,12 @@ class Application:
                 if hasattr(self,'terminal'): self.terminal.enabled=False
                 return
             mode,exchange,token=self.mode,self.exchange,self.provider.token
+            provider=self.provider
             generation=self.terminal.generation if hasattr(self,'terminal') else 0
         def same_source():
             return (mode,exchange,token)==(self.mode,self.exchange,self.provider.token) and generation==(self.terminal.generation if hasattr(self,'terminal') else 0)
         try:
-            quotes = self.provider.quotes(exchange)
+            quotes = provider.quotes(exchange)
             with self.lock:
                 if not same_source(): return
                 self.quotes=quotes
@@ -200,38 +267,46 @@ class Application:
                 item["fresh"] = bool(qy and qx and fresh(qy, clock) and fresh(qx, clock) and not self.error)
                 pairs.append(item)
             return {"mode": self.mode, "exchange": self.exchange, "account_key": self.account_key,
-                    "connected": bool(self.provider.token) and not self.oauth_status()['expired'], "error": self.error, "last_poll": self.last_poll,
+                    "connected": bool(self.provider.token) and not getattr(self.provider, 'blocked', False) and (self.mode != 'live' or not self.oauth_status()['expired']), "error": self.error, "last_poll": self.last_poll,
+                    "provider_name": self.provider_name, "groww": dict(self.groww_status),
                     "oauth": self.oauth_status(),
                     "csrf": self.csrf, "pairs": pairs, "account": account,
                     "market_time": clock.isoformat(), "performance": summary(account),
                     "transactions": transactions(account), "paper_model": self.paper_learner.view(),
                     "daily_report": self.report_lab.view(),
+                    "community": self.community.view(), "demo_session": dict(self.demo_session.job),
                     "local": self.local.view(self.account_key) if self.mode == 'demo' else None,
                     "terminal": self.terminal.view(),
-                    "source": "Synthetic demo · not market prices" if self.mode == "demo" else "Upstox · 5-second quote polling",
+                    "source": "Synthetic demo · not market prices" if self.mode == "demo" else self.provider_name + " · quotes refreshed after each 5-second polling wait",
                     "costs": {"fee_bps": 3, "slippage_bps": 5, "annual_borrow_percent": 10}}
 
     def action(self, route, data):
+        if route == '/api/connection' and data.get('mode') == 'groww':
+            return self.connect_groww(data)
         with self.lock:
+            if self.demo_session.job['running'] and route not in ('/api/demo/stop','/api/community'):
+                raise ValueError('Stop the automated demo or wait for it to finish before changing trading controls.')
             if route == "/api/connection":
                 mode, exchange = data.get("mode"), data.get("exchange")
                 if mode not in ("demo", "live") or exchange not in ("NSE", "BSE"):
                     raise ValueError("Choose demo/live mode and NSE/BSE exchange.")
                 self.terminal.can_switch(mode+':'+exchange)
                 token = data.get("token", "").strip()
-                old_token = self.provider.token
+                candidate = self.upstox
+                old_token = candidate.token
                 if token:
                     if len(token) > 8192 or any(c.isspace() for c in token):
                         raise ValueError("Invalid access-token format.")
-                    self.provider.token = token
-                if mode == "live" and not self.provider.token:
+                    candidate.token = token
+                if mode == "live" and not candidate.token:
                     raise ValueError("An Upstox access token is required for live data.")
                 # Validate before switching accounts; failure preserves the active account.
                 try:
-                    quotes = self.provider.quotes(exchange) if mode == "live" else {}
+                    quotes = candidate.quotes(exchange) if mode == "live" else {}
                 except Exception:
-                    self.provider.token = old_token
+                    candidate.token = old_token
                     raise
+                self.provider = candidate
                 self.mode, self.exchange, self.quotes = mode, exchange, quotes
                 self.oauth.cancel()
                 if token: self.oauth_user=None
@@ -246,7 +321,7 @@ class Application:
                 self.provider.token = ""
                 self.oauth.cancel()
                 self.oauth_user=None
-                self.mode, self.quotes = "live", {}
+                self.mode, self.quotes = ('groww' if self.mode == 'groww' else 'live'), {}
                 self.terminal.reset()
                 self.poll()
             else:
@@ -257,6 +332,14 @@ class Application:
                     self.terminal.scan()
                 elif route == '/api/report/run':
                     self.report_lab.start()
+                elif route == '/api/community':
+                    self.community.configure(data)
+                    if data.get('refresh', False): self.community.start()
+                elif route == '/api/demo/run':
+                    self.demo_session.start()
+                elif route == '/api/demo/stop':
+                    self.demo_session.cancelled = True
+                    self.demo_session.job['message'] = 'Stopping new demo entries; normal risk exits will finish remaining positions.'
                 elif route == '/api/local':
                     if self.mode != 'demo': raise ValueError('Select local simulation first.')
                     if self.terminal.job['running']: raise ValueError('Wait for model training to finish.')
@@ -309,7 +392,7 @@ class Application:
                         if not info:
                             raise ValueError("Load pair history in ML Lab before opening a position.")
                         age = (now().date() - pd.Timestamp(info["history_end"]).date()).days
-                        if age > 7 and self.mode == 'live' and not report:
+                        if age > 7 and self.mode != 'demo' and not report:
                             raise ValueError("The signal history is stale. Reload it in ML Lab.")
                         self.book.trade(self.account_key, self.quotes, data.get("request_id"), pair=pair,
                                         side=data.get("side"), budget=data.get("budget"), beta=info["beta"],
@@ -356,8 +439,10 @@ def handler_for(app):
                     app.finish_oauth(params,self.headers.get('Cookie'),'http://'+self.headers['Host'])
                 except OAuthError as exc:
                     result=exc.code
+                    app.oauth.record_error(result)
                 except Exception:
                     result='failed'
+                    app.oauth.record_error(result)
                 return self.send(303,b'',headers={'Location':'/?upstox='+result,'Set-Cookie':login_cookie(clear=True)})
             if route == "/favicon.ico":
                 return self.send(204, b"", "image/x-icon")
@@ -386,7 +471,7 @@ def handler_for(app):
                 writer.writeheader()
                 writer.writerows(rows)
                 return self.send(200, buffer.getvalue(), 'text/csv; charset=utf-8')
-            name = {"/": "terminal.html", "/app.js": "terminal.js", "/local.js": "local.js", "/report.js": "report.js", "/style.css": "terminal.css"}.get(route)
+            name = {"/": "terminal.html", "/app.js": "terminal.js", "/local.js": "local.js", "/report.js": "report.js", "/community.js": "community.js", "/style.css": "terminal.css"}.get(route)
             if name:
                 return self.send(200, (STATIC/name).read_bytes(), (mimetypes.guess_type(name)[0] or "text/plain")+"; charset=utf-8")
             self.send(404, {"error": "Not found."})
@@ -431,6 +516,9 @@ def main():
     def refresh():
         while not stop.wait(5):
             app.poll()
+    def community_poll():
+        while not stop.wait(5):
+            app.community.tick()
     def automate():
         while not stop.wait(5):
             try:
@@ -448,12 +536,16 @@ def main():
                         app.advance_local()
                         app.local.last_step = time.monotonic()
                     app.terminal.manage()
-            except Exception:
+            except Exception as exc:
                 with app.lock:
                     app.terminal.enabled=False
-                    app.terminal.feed_error='Paper execution failed; entries paused. Review positions before restarting.'
-    server = ThreadingHTTPServer(("127.0.0.1", args.port), handler_for(app))
+                    app.terminal.feed_error=str(exc) if isinstance(exc, ValueError) else 'Paper execution failed; entries paused. Review positions before restarting.'
+    try:
+        server = LocalHTTPServer(("127.0.0.1", args.port), handler_for(app))
+    except OSError:
+        parser.exit(2, f'Cannot listen on 127.0.0.1:{args.port}. Another app instance may already be running; use that window or stop it before restarting.\n')
     threading.Thread(target=refresh, daemon=True).start()
+    threading.Thread(target=community_poll, daemon=True).start()
     threading.Thread(target=automate, daemon=True).start()
     threading.Thread(target=execute, daemon=True).start()
     source = 'local simulation' if app.mode == 'demo' else 'Upstox data'

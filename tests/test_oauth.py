@@ -16,7 +16,7 @@ import urllib.request
 
 from app.oauth import OAuthConfig, UpstoxOAuth, OAuthError, CALLBACK, browser_binding
 from app.market import IST, now
-from app.server import Application, handler_for
+from app.server import Application, handler_for, LocalHTTPServer
 
 
 class OAuthFlowTests(unittest.TestCase):
@@ -81,6 +81,7 @@ class OAuthFlowTests(unittest.TestCase):
             req=opener.open.call_args.args[0]
             self.assertEqual(req.full_url,'https://api.upstox.com/v2/login/authorization/token')
             self.assertEqual(req.method,'POST')
+            self.assertEqual(req.get_header('User-agent'),'PairwisePaperTrading/1.0')
             self.assertEqual(parse_qs(req.data.decode())['client_secret'],['test-secret'])
             self.assertNotIn('test-secret',req.full_url)
             expiry=datetime.fromisoformat(result['expires_at'])
@@ -102,6 +103,39 @@ class OAuthFlowTests(unittest.TestCase):
                 config=OAuthConfig.load(directory,9999)
             self.assertEqual(config.client_id,'env-key');self.assertEqual(config.client_secret,'literal-$value')
             self.assertEqual(config.redirect_uri,'http://127.0.0.1:9999'+CALLBACK)
+
+    def test_provider_error_codes_are_actionable_without_echoing_body(self):
+        for provider_code, expected in [('UDAPI100069','credentials'),('UDAPI100070','redirect'),
+                                        ('UDAPI100057','auth_code'),('UNKNOWN','failed')]:
+            body=json.dumps({'errors':[{'errorCode':provider_code,'message':'test-secret private-code'}]}).encode()
+            opener=Mock()
+            opener.open.side_effect=urllib.error.HTTPError('https://api.upstox.com',400,'Bad Request',{},io.BytesIO(body))
+            with patch('app.oauth.urllib.request.build_opener',return_value=opener),self.assertRaises(OAuthError) as caught:
+                self.flow.exchange('private-code')
+            self.assertEqual(caught.exception.code,expected)
+            self.assertNotIn('test-secret',str(caught.exception))
+            self.assertNotIn('private-code',str(caught.exception))
+
+    def test_error_status_is_sanitized_and_cleared_by_new_login(self):
+        self.flow.record_error('credentials')
+        self.assertEqual(self.flow.error_status()['code'],'credentials')
+        self.flow.record_error('private-secret')
+        self.assertNotIn('private-secret',json.dumps(self.flow.error_status()))
+        self.begin()
+        self.assertIsNone(self.flow.error_status())
+
+    def test_cloudflare_block_is_not_misreported_as_bad_credentials(self):
+        body=json.dumps({'cloudflare_error':True,'error_code':1010,
+                         'detail':'private-code test-secret must never be echoed'}).encode()
+        opener=Mock()
+        opener.open.side_effect=urllib.error.HTTPError('https://api.upstox.com',403,'Forbidden',{},io.BytesIO(body))
+        with patch('app.oauth.urllib.request.build_opener',return_value=opener),self.assertRaises(OAuthError) as caught:
+            self.flow.exchange('private-code')
+        self.assertEqual(caught.exception.code,'client_blocked')
+        self.assertIn('Cloudflare 1010',str(caught.exception))
+        self.assertNotIn('test-secret',str(caught.exception))
+        self.assertNotIn('private-code',str(caught.exception))
+        self.assertEqual(opener.open.call_count,1)
 
 
 class OAuthApplicationTests(unittest.TestCase):
@@ -180,7 +214,15 @@ class OAuthApplicationTests(unittest.TestCase):
                 self.assertNotIn(b'private-access-token',response.read())
             with client.open(callback) as response:self.assertEqual(response.url,base+'/?upstox=invalid_state')
             self.assertEqual(exchange.call_count,1)
+            self.assertEqual(self.app.snapshot()['oauth']['last_error']['code'],'invalid_state')
         self.assertFalse(list(jar))
+
+    def test_second_server_cannot_share_oauth_callback_port(self):
+        first=LocalHTTPServer(('127.0.0.1',0),handler_for(self.app))
+        self.addCleanup(first.server_close)
+        with self.assertRaises(OSError):
+            second=LocalHTTPServer(('127.0.0.1',first.server_port),handler_for(self.app))
+            self.addCleanup(second.server_close)
 
 
 if __name__=='__main__':unittest.main()

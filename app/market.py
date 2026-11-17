@@ -13,6 +13,7 @@ import numpy as np
 import pandas as pd
 
 IST = timezone(timedelta(hours=5, minutes=30))
+USER_AGENT = 'PairwisePaperTrading/1.0'
 PAIRS = [
     {"id": "banks", "name": "Banking", "y": "HDFCBANK", "x": "ICICIBANK", "isin_y": "INE040A01034", "isin_x": "INE090A01021"},
     {"id": "it", "name": "Information technology", "y": "INFY", "x": "TCS", "isin_y": "INE009A01021", "isin_x": "INE467B01029"},
@@ -52,7 +53,7 @@ class Upstox:
         if not self.token:
             raise ValueError("Connect an Upstox access token in Data Connection first.")
         req = urllib.request.Request("https://api.upstox.com" + path,
-            headers={"Authorization": "Bearer " + self.token, "Accept": "application/json"})
+            headers={"Authorization": "Bearer " + self.token, "Accept": "application/json", "User-Agent": USER_AGENT})
         try:
             with urllib.request.urlopen(req, timeout=20) as response:
                 body = json.load(response)
@@ -69,7 +70,8 @@ class Upstox:
         if exchange not in self.instruments:
             url = f"https://assets.upstox.com/market-quote/instruments/exchange/{exchange}.json.gz"
             try:
-                with urllib.request.urlopen(url, timeout=25) as response:
+                request = urllib.request.Request(url, headers={'User-Agent': USER_AGENT, 'Accept': 'application/gzip'})
+                with urllib.request.urlopen(request, timeout=25) as response:
                     records = json.loads(gzip.decompress(response.read()))
             except (urllib.error.URLError, TimeoutError, OSError, ValueError):
                 raise ValueError("Could not load the Upstox instrument master.") from None
@@ -176,7 +178,8 @@ def demo_candles(pair_index):
     frame = demo_history(pair_index)
     # Reuse a reproducible correlated process on a synthetic intraday calendar.
     times = []
-    for date in pd.bdate_range(end=datetime.now(IST).date()-timedelta(days=1), periods=10):
+    # Start four weeks behind the latest past session to leave room for replay.
+    for date in pd.bdate_range(end=now().astimezone(IST).date()-timedelta(days=29), periods=10):
         start = datetime.combine(date.date(), datetime.min.time(), tzinfo=IST).replace(hour=9, minute=15)
         times.extend(int((start+timedelta(minutes=5*i)).timestamp()) for i in range(72))
     rng = np.random.default_rng(200+pair_index)

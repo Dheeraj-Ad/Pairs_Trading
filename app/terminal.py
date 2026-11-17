@@ -22,7 +22,7 @@ class Terminal:
         self.app=app
         self.models, self.candles, self.reports, self.signals = {}, {}, {}, {}
         self.screen=[]
-        self.job={'running':False,'message':'Scan local or Upstox candles to train the candidate pairs.'}
+        self.job={'running':False,'message':'Scan local, Upstox or Groww candles to train the candidate pairs.'}
         self.enabled=False
         self.config=deepcopy(DEFAULTS)
         self.last_candles=0.
@@ -69,6 +69,8 @@ class Terminal:
         self.load_config()
 
     def can_switch(self, target=None):
+        if hasattr(self.app,'demo_session') and self.app.demo_session.job['running']:
+            raise ValueError('Stop the automated demo or wait for it to finish before switching accounts.')
         if self.app.local.batch_active:
             raise ValueError('Pause local advancement or wait for the batch before switching accounts.')
         if self.job['running']:
@@ -81,8 +83,8 @@ class Terminal:
             raise ValueError('Pause local advancement or wait for the batch before replacing models.')
         if self.job['running']:
             raise ValueError('A scan is already running.')
-        if self.app.mode=='live' and not self.app.provider.token:
-            raise ValueError('Connect Upstox before scanning real candles.')
+        if self.app.mode!='demo' and (not self.app.provider.token or getattr(self.app.provider, 'blocked', False)):
+            raise ValueError('Connect your market-data provider before scanning real candles.')
         if any(p.get('origin')=='auto' for p in self.app.book.read(self.app.account_key)['positions']):
             raise ValueError('Close automated positions before replacing their models.')
         self.enabled=False
@@ -161,12 +163,13 @@ class Terminal:
             generation=self.generation
             mode,exchange=app.mode,app.exchange
             ids=list(self.candles)
-            due=mode=='live' and ids and not self.job['running'] and time.monotonic()-self.last_candles>=15
+            provider=app.provider
+            due=mode!='demo' and ids and not self.job['running'] and time.monotonic()-self.last_candles>=15
             if due: self.last_candles=time.monotonic()
         # Do not hold the application lock over network I/O: the terminal stays responsive.
         if due:
             try:
-                updates={p['id']:app.provider.candles(exchange,p,intraday_only=True) for p in PAIRS if p['id'] in ids}
+                updates={p['id']:provider.candles(exchange,p,intraday_only=True) for p in PAIRS if p['id'] in ids}
                 with app.lock:
                     if generation!=self.generation: return
                     for pair_id,bars in updates.items():
@@ -257,7 +260,7 @@ class Terminal:
             if not row['eligible']: continue
             pair_id=row['id']; signal=self.signals.get(pair_id)
             if not signal or not signal['fresh'] or not 0<=self.clock().timestamp()-(signal['bar_time']+300)<=90: continue
-            if app.mode=='live' and (self.clock()-datetime.fromisoformat(signal['trained_at'])).total_seconds()>86400: continue
+            if app.mode!='demo' and (self.clock()-datetime.fromisoformat(signal['trained_at'])).total_seconds()>86400: continue
             pair=next(p for p in PAIRS if p['id']==pair_id)
             if any(p['pair']==pair_id for p in app.book.read(app.account_key)['positions']): continue
             if not self.config['entry_z']<=abs(signal['zscore'])<4 or signal['score']<signal['threshold']: continue

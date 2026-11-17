@@ -2,6 +2,24 @@
 
 A local NSE/BSE pairs trading terminal with synthetic local simulation, actual Upstox OHLCV when connected, ML-qualified pairs, manual and automatic **paper** execution, and detailed profit/loss history. All execution uses virtual money. No broker order endpoint is implemented.
 
+## Community API and automated demonstrations
+
+The **Community data** page integrates the public contract of [0xramm/Indian-Stock-Market-API](https://github.com/0xramm/Indian-Stock-Market-API). Its advertised endpoint, `http://65.0.104.9`, is preconfigured. Choose **Apply & fetch snapshots** to try it, or enable polling at 60-second intervals. You can replace the URL with your own compatible HTTPS deployment or HTTP localhost deployment. This does not change the terminal's active source or account.
+
+| Workflow | Data | Execution |
+|---|---|---|
+| Local simulation | Generated five-minute candles | Automatic/manual paper trades with persistent history and P&L |
+| Upstox | Authenticated quotes and OHLCV | Automatic/manual paper trades; no broker orders |
+| Community API | Yahoo-based numeric stock snapshots | Comparison only; never used to price fills or train trading models |
+
+The repository currently exposes `/stock/list?symbols=...&res=num`, but no historical-candle endpoint. Its batch response also lacks exchange trade timestamps. The response-generation timestamp is not proof of a recent trade. Therefore community prices are not labeled executable/fresh, no OHLCV history is invented, and this feed cannot independently drive the existing five-minute ML strategy. On the Community page, qualified-pair plots show changes between saved polling observations; their qualification comes from the selected terminal source. Synthetic model qualification does not establish a real-market relationship.
+
+The advertised public endpoint did not respond during integration verification. The connector is implemented and tested against the documented schema, but a successful live response is **not** claimed. An unavailable service displays an error; previous saved observations remain visibly identified. No broker token, secret or cookies are sent to it. Invalid prices, wrong exchanges, duplicate symbols and oversized responses are rejected. Endpoint/exchange snapshots are stored separately from every trading ledger. Background requests never hold the trading-state lock. Polling starts disabled after a restart.
+
+To show actual simulated automatic transactions, select **Local simulation**, then click **Run automated paper demo** in the terminal or Community page. It trains on the current local history, applies the existing statistical/ML qualification and risk rules, advances up to 150 synthetic candles and pauses entries. Remaining automated positions finish through the normal risk manager. **Stop demo** ends advancement early and lets risk exits finish. Account switches and conflicting trading controls are blocked while the run is active. Nothing forces a pair, trade or positive result; an empty qualified set is a valid outcome. Existing trades are preserved. See **Trade history → Automatic**, **Export every leg fill**, and **P&L** for results.
+
+Implementation: `app/community.py`, `app/demo_session.py`, `app/static/community.js`. Metadata and observations live in ignored `runtime/`; your Upstox connection continues to use its existing independent configuration. Test with `python scripts/check_community_browser.py`; that browser check uses explicitly mocked community snapshots and real synthetic model/execution logic.
+
 ## Daily workflow from your project report
 
 Open **Daily report → Run all five stages** to run your report's daily research alongside the five-minute terminal:
@@ -39,7 +57,7 @@ The application executes actual statistical calculations and trains actual sciki
 | Fees, slippage and borrowing | Illustrative assumptions | Same illustrative assumptions |
 | Meaning of positive P&L | A result of a synthetic simulation | A paper result on market inputs; not realized broker profit |
 
-Check the source badge and banner. `/api/state` exposes `mode`, `source`, `account_key` and `market_time`; `demo:NSE` is not an exchange account. A failed Upstox request does not silently fall back to synthetic prices. Local charts use the simulation clock and may advance beyond today's real date.
+Check the source badge and banner. `/api/state` exposes `mode`, `source`, `account_key` and `market_time`; `demo:NSE` is not an exchange account. A failed Upstox request does not silently fall back to synthetic prices. Local charts use a simulation clock with dates in the past or present. New demos start about four weeks behind today, and advancement pauses before a candle would finish in the future. On startup, legacy future demo timelines shift backward by whole weeks, including fills, model-decision timestamps and risk-day records. Prices, holding durations, balances and P&L stay unchanged; these remain synthetic examples, not historical market trades.
 
 The recorded demonstration produced 15 closed trades (13 automatic, 2 manual) and 60 leg fills, with INR 3,451.92 net simulated P&L. This is a historical demonstration result, not a forecast or guaranteed outcome of later runs. The paper-outcome learner requires at least 40 eligible completed trades, plus usable splits and both training classes; 15 trades are insufficient to train it.
 
@@ -92,6 +110,8 @@ Open **http://127.0.0.1:8765**. Use `--port 8766` if needed. `start_app.ps1` is 
 
 ## Use locally now
 
+Use **Demo account** or **Upstox account** in the account bar to switch the active paper account for the selected exchange. Each account preserves its own balance, transaction history and P&L; the bar links directly to both reports. Switching to demo keeps the current Upstox token in server memory for this session. A scan, running demo, local batch or open automated positions must finish before switching. Run **Scan & train pairs** after switching if you want to trade; saved history is available immediately.
+
 1. Wait for the initial scan, then select a qualified pair. Local OHLCV is **generated synthetic data**, not downloaded NSE/BSE history.
 2. Open a manual pair trade using the ticket, or click **Enable automatic paper trades**. Automatic entries retain the model score, qualification and risk gates; trades are not forced and profits are not guaranteed.
 3. Click **Run local market** (one five-minute candle approximately every two seconds), **Step 5 minutes**, or **Advance 75 candles**. The simulated clock drives quotes, candles, fills, borrowing, holding limits and session exits. Pausing the local market freezes time; pausing automatic entries keeps exits active when data advances.
@@ -133,6 +153,10 @@ The app owner must register an app in [Upstox Developer Apps](https://account.up
 Environment variables override `.env` values. If you change the port, update both the registered callback and `UPSTOX_REDIRECT_URI`. Use the same hostname in the browser and callback: `localhost` and `127.0.0.1` are different origins. This local implementation supports HTTP loopback callbacks only; it is not a hosted, multi-user login service.
 
 Login attempts expire after ten minutes and are tied to an HttpOnly, SameSite=Lax browser cookie and a single-use random state. Tokens and the API secret never enter browser storage. The server exchanges the code directly with Upstox; the callback then redirects to a clean application URL. A denied or failed authorization preserves the prior connection. Reconnecting to the same exchange remains possible with existing automated positions; changing exchanges still requires closing them first.
+
+Run only one server per port. The server uses an exclusive listening socket on Windows to prevent duplicate instances from splitting the login session and callback. Failed callbacks now leave a persistent, sanitized diagnostic in the connection dialog and banner. Known Upstox credential, redirect and authorization-code errors have specific messages; raw provider responses and secrets are never displayed. Start a fresh sign-in after correcting an error; do not reload a previously used callback URL.
+
+All Upstox requests identify this application as `PairwisePaperTrading/1.0`, including the token exchange, market-data API and instrument downloads. This avoids relying on Python's default client identifier, which was rejected with Cloudflare 1010 during local verification. TLS verification remains enabled. Any remaining HTTP 403/1010 is shown as an access block rather than incorrectly labeling the credentials invalid; contact Upstox if that block persists.
 
 Upstox access tokens expire at the next 03:30 IST. The app shows the expiry, pauses new entries after expiry, and offers **Reconnect with Upstox**. A server restart also requires sign-in again because tokens are kept only in memory. This automates the token exchange, not the broker's login/OTP requirements; there is no promise of permanent unattended authorization. See the [Upstox authentication](https://upstox.com/developer/api-documentation/authentication/) and [token](https://upstox.com/developer/api-documentation/get-token/) documentation.
 
@@ -199,6 +223,7 @@ node --check app/static/terminal.js
 .\.venv\Scripts\python.exe scripts/check_terminal_browser.py
 .\.venv\Scripts\python.exe scripts/check_oauth_browser.py
 .\.venv\Scripts\python.exe scripts/check_daily_report_browser.py
+.\.venv\Scripts\python.exe scripts/check_community_browser.py
 ```
 
 Tests cover target chronology, qualification data, atomic fills, persistent daily limits, duplicate signals, stale feeds, automatic loss/profit exits, account isolation, token reconnection, OAuth state/cookie binding, replay rejection, expiry, charts, and mobile layout. Browser tests use temporary accounts, synthetic candles, and mocked Upstox authorization/token responses; screenshots go to `outputs/terminal-preview/` and `outputs/oauth-preview/`. Real authorization requires your registered app credentials and Upstox account; no live connection is claimed by mocked tests.

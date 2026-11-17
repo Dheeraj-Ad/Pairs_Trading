@@ -27,7 +27,17 @@ function historyMatch(row){return ($('history-origin').value==='all'||(row.origi
 function performanceTable(rows){return '<div class="table-wrap"><table><thead><tr><th>SECTION</th><th>REALIZED</th><th>OPEN NET</th><th>TOTAL P&L</th><th>FEES</th><th>BORROW</th><th>OPEN / CLOSED</th><th>WIN / LOSS</th></tr></thead><tbody>'+rows.map(r=>`<tr><td>${esc(r.label)}</td><td class="${tone(r.realized)}">${money(r.realized)}</td><td class="${tone(r.open_net)}">${money(r.open_net)}</td><td class="${tone(r.total)}">${money(r.total)}</td><td>${money(r.fees)}</td><td>${money(r.borrow)}</td><td>${r.open} / ${r.closed}</td><td>${r.wins} / ${r.losses}</td></tr>`).join('')+'</tbody></table></div>';}
 function renderLocal(){
   if(typeof renderReport==='function')renderReport();
+ if(typeof renderCommunity==='function')renderCommunity();
   const local=state.local, t=state.terminal, learner=state.paper_model, pair=t.qualified.find(p=>p.id===selected);
+  const switchBlocked=busy||t.job.running||!!local?.batch_active||!!state.demo_session?.running||state.account.positions.some(p=>p.origin==='auto');
+  for(const [id,mode] of [['account-demo','demo'],['account-live','live']]){
+    const active=state.mode===mode;
+    $(id).setAttribute('aria-pressed',String(active));
+    $(id).disabled=active||switchBlocked;
+    $(id).title=switchBlocked?'Finish the current scan or demo, pause advancement, and close automated positions before switching.':'';
+  }
+  $('active-account').textContent=`${local?'Demo account':state.provider_name||'Upstox'} · ${state.exchange} · ${local?'synthetic prices':'market data'} · paper money`;
+  $('account-summary').textContent=`${state.account.trades.length} closed trades · ${state.account.positions.length} open positions · realized P&L ${money(state.performance.overall.realized)} · equity ${money(state.account.equity)}`;
   const universe=state.pairs.map(p=>p.id).join('|');
   if($('history-pair').dataset.universe!==universe){
     const previous=$('history-pair').value;
@@ -63,3 +73,15 @@ $('manual-form').onsubmit=e=>{e.preventDefault();action('/api/open',{pair:select
 $('train-paper').onclick=()=>action('/api/paper/train',{},'Paper outcome model trained. Review its validation and test results.');
 $('paper-filter').onclick=()=>action('/api/paper/filter',{enabled:!state.paper_model.enabled},'Learned entry filter updated.');
 for(const id of ['history-origin','history-pair'])$(id).onchange=render;
+async function switchPaperAccount(mode){
+  if(busy||!state||state.mode===mode)return;
+  if(mode==='live'&&state.mode==='demo'&&(!state.connected||state.oauth.expired)){
+    openConnection();$('mode').value='live';renderConnection();return;
+  }
+  const label=mode==='demo'?'Demo':'Upstox';
+  if(await action('/api/connection',{mode,exchange:state.exchange},`${label} account selected. Its saved transaction history and P&L are ready.`)){
+    $('history-origin').value='all';$('history-pair').value='all';render();
+  }
+}
+$('account-demo').onclick=()=>switchPaperAccount('demo');
+$('account-live').onclick=()=>switchPaperAccount('live');

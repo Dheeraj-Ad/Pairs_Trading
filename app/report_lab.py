@@ -6,6 +6,7 @@ import uuid
 import pandas as pd
 
 from app.market import PAIRS, Upstox, demo_history, now
+from app.groww import Groww
 
 
 class ReportLab:
@@ -27,9 +28,10 @@ class ReportLab:
     def start(self):
         if self.job['running']:raise ValueError('A daily report run is already in progress.')
         app=self.app;account=app.account_key;mode,exchange=app.mode,app.exchange
-        if mode=='live' and (not app.provider.token or app.oauth_status()['expired']):
-            raise ValueError('Connect an active Upstox session before loading daily exchange history.')
-        provider=Upstox(app.provider.token) if mode=='live' else None
+        if mode!='demo' and (not app.provider.token or getattr(app.provider, 'blocked', False) or (mode=='live' and app.oauth_status()['expired'])):
+            raise ValueError('Connect an active market-data session before loading daily exchange history.')
+        provider=Upstox(app.provider.token) if mode=='live' else app.provider if mode=='groww' else None
+        provider_name=app.provider_name
         self.job=dict(running=True,message='Loading daily prices for all 20 companies…',account=account,error=None)
         run_id=str(uuid.uuid4());directory=self.directory/account.replace(':','-')/run_id
         def progress(message):
@@ -42,7 +44,7 @@ class ReportLab:
                     progress(f"Daily history {i+1}/{len(PAIRS)} · {pair['y']} / {pair['x']}")
                     frame=demo_history(i) if mode=='demo' else provider.history(exchange,pair)
                     for leg in ('y','x'):columns[pair[leg]]=frame[leg]
-                source=f'{exchange} · synthetic generated daily prices' if mode=='demo' else f'{exchange} · Upstox daily historical closes (unadjusted)'
+                source=f'{exchange} · synthetic generated daily prices' if mode=='demo' else f'{exchange} · {provider_name} daily historical closes (unadjusted)'
                 result=run(pd.DataFrame(columns),directory,source,progress)
                 result.update(run_id=run_id,account=account,created_at=now().isoformat())
                 (directory/'report.json').write_text(json.dumps(result,allow_nan=False,indent=2),encoding='utf-8')

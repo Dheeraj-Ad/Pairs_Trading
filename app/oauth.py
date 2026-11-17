@@ -6,17 +6,36 @@ import json
 import os
 from pathlib import Path
 import secrets
+import ssl
 import threading
 import time
 from urllib.parse import urlencode, urlparse
 import urllib.error
 import urllib.request
 
-from app.market import IST, now
+from app.market import IST, USER_AGENT, now
 
 CALLBACK = '/auth/upstox/callback'
 COOKIE = 'pairwise_upstox_login'
 KEYS = ('UPSTOX_CLIENT_ID', 'UPSTOX_CLIENT_SECRET', 'UPSTOX_REDIRECT_URI')
+
+# Only these locally authored messages may reach the UI; provider text can contain secrets.
+LOGIN_ERRORS = {
+    'invalid_state': 'Login session mismatch. Open the app at the registered callback host, then start Connect with Upstox again in the same browser tab.',
+    'expired': 'Login timed out. Start Connect with Upstox again.',
+    'cancelled': 'Upstox sign-in was cancelled or denied. Your previous connection was preserved.',
+    'changed': 'The connection changed during sign-in. Start Connect with Upstox again.',
+    'credentials': 'Upstox rejected the API key or API secret (UDAPI100069). Check both values in .env, restart the app, and sign in again.',
+    'redirect': 'Upstox rejected the redirect URL (UDAPI100070). The developer-app URL and UPSTOX_REDIRECT_URI must match exactly.',
+    'auth_code': 'Upstox rejected the authorization code (UDAPI100057). Start a fresh sign-in; do not reload or reuse the callback URL.',
+    'tls': 'The server could not verify the Upstox HTTPS certificate. Check the Python certificate store or network proxy; certificate verification remains enabled.',
+    'network': 'The server could not reach Upstox to exchange the login code. Check the network and start a fresh sign-in.',
+    'rate_limit': 'Upstox temporarily limited authorization requests. Wait before starting a fresh sign-in.',
+    'provider': 'Upstox authorization is temporarily unavailable. Start a fresh sign-in after the service recovers.',
+    'client_blocked': 'Upstox blocked the server HTTP client (HTTP 403 / Cloudflare 1010). This is not a credential-validation result. Contact Upstox support about API access for this client; repeated PIN logins will not resolve the block.',
+    'forbidden': 'Upstox denied the server token request (HTTP 403). Check API access with Upstox support. This response alone does not establish that your API key or secret is incorrect.',
+    'failed': 'Upstox authorization did not complete. Verify the app credentials and callback URL, then start a fresh sign-in.',
+}
 
 
 class OAuthError(ValueError):
@@ -101,6 +120,16 @@ class UpstoxOAuth:
         self.pending = None
         self.revision = 0
         self.lock = threading.Lock()
+        self.last_error = None
+
+    def record_error(self, code):
+        code = code if code in LOGIN_ERRORS else 'failed'
+        with self.lock:
+            self.last_error = dict(code=code, message=LOGIN_ERRORS[code])
+
+    def error_status(self):
+        with self.lock:
+            return dict(self.last_error) if self.last_error else None
 
     def cancel(self):
         with self.lock:
@@ -118,6 +147,7 @@ class UpstoxOAuth:
         state, binding = secrets.token_urlsafe(32), secrets.token_urlsafe(32)
         with self.lock:
             self.revision += 1
+            self.last_error = None
             # One local user: a newer login replaces an older pending attempt.
             self.pending = dict(state=state, binding=binding, expires=time.monotonic()+600,
                                 exchange=exchange, generation=generation, revision=self.revision)
@@ -149,11 +179,33 @@ class UpstoxOAuth:
             client_secret=self.config.client_secret, redirect_uri=self.config.redirect_uri,
             grant_type='authorization_code')).encode()
         request = urllib.request.Request('https://api.upstox.com/v2/login/authorization/token',
-            data=payload, headers={'Accept':'application/json', 'Content-Type':'application/x-www-form-urlencoded'}, method='POST')
+            data=payload, headers={'Accept':'application/json', 'Content-Type':'application/x-www-form-urlencoded',
+                                   'User-Agent': USER_AGENT}, method='POST')
         try:
             with urllib.request.build_opener(NoRedirect()).open(request, timeout=20) as response:
                 result = json.loads(response.read(1_000_000))
-        except (urllib.error.URLError, TimeoutError, OSError, ValueError):
+        except urllib.error.HTTPError as exc:
+            code = 'rate_limit' if exc.code == 429 else 'provider' if exc.code >= 500 else 'forbidden' if exc.code == 403 else 'failed'
+            try:
+                body = json.loads(exc.read(65536))
+                if (exc.code == 403 and isinstance(body, dict) and body.get('cloudflare_error') is True
+                        and str(body.get('error_code')) == '1010'):
+                    code = 'client_blocked'
+                errors = body.get('errors', []) if isinstance(body, dict) else []
+                known = {'UDAPI100069': 'credentials', 'UDAPI100070': 'redirect', 'UDAPI100057': 'auth_code'}
+                for item in errors if isinstance(errors, list) else []:
+                    if isinstance(item, dict) and item.get('errorCode') in known:
+                        code = known[item['errorCode']]
+                        break
+            except (ValueError, OSError):
+                pass
+            raise OAuthError(code, LOGIN_ERRORS[code]) from None
+        except urllib.error.URLError as exc:
+            code = 'tls' if isinstance(exc.reason, ssl.SSLCertVerificationError) else 'network'
+            raise OAuthError(code, LOGIN_ERRORS[code]) from None
+        except (TimeoutError, OSError):
+            raise OAuthError('network', LOGIN_ERRORS['network']) from None
+        except ValueError:
             # Do not forward provider bodies, which may contain credentials or personal data.
             raise OAuthError('failed', 'Could not complete Upstox authorization. Check the app configuration and reconnect.') from None
         token = result.get('access_token') if isinstance(result, dict) else None
